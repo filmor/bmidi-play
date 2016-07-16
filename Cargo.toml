@@ -1,0 +1,12 @@
+[package]
+name = "bmidi-play"
+version = "0.0.1"
+authors = ["Benedikt Reinartz <filmor@gmail.com>"]
+
+[dependencies]
+bmidi = "0.0.1"
+synth = "0.10.0"
+time_calc = "0.11.0"
+clap = "2.5.2"
+portaudio = "0.6.4"
+dsp-chain = "0.13.1"
