@@ -4,7 +4,7 @@ version = "0.0.1"
 authors = ["Benedikt Reinartz <filmor@gmail.com>"]
 
 [dependencies]
-bmidi = "0.0.1"
+bmidi = "0.0.2"
 synth = "0.10.0"
 time_calc = "0.11.0"
 clap = "2.5.2"
