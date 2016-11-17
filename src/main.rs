@@ -107,10 +107,13 @@ fn run() -> Result<(), pa::Error> {
                         println!("Key {:?} {:?} {}", typ, note, velocity);
                         match typ {
                             KeyEventType::Press => {
-                                synth.note_on(note, velocity as f32 / 256f32);
+                                // FIXME: Conversion not working?!
+                                let hz = note.to_step().to_hz().hz();
+                                synth.note_on(hz, velocity as f32 / 256f32);
                             },
                             KeyEventType::Release => {
-                                synth.note_off(note);
+                                let hz = note.to_step().to_hz().hz();
+                                synth.note_off(hz);
                             }
                             _ => {}
                         }
