@@ -5,13 +5,13 @@ authors = ["Benedikt Reinartz <filmor@gmail.com>"]
 
 [dependencies]
 bmidi = "0.0.2"
-synth = "0.10.0"
-time_calc = "0.11.0"
-clap = "2.18.0"
-cpal = "0.4.1"
-dsp-chain = "0.12.0"
-futures = "0.1.3"
-crossbeam = "0.2.10"
+synth = "0.10"
+time_calc = "0.11"
+clap = "2"
+cpal = "0.4"
+dsp-chain = "0.12"
+futures = "0.1"
+crossbeam = "0.2"
 
 [replace]
 "bmidi:0.0.2" = { path = "../bmidi" }

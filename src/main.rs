@@ -18,59 +18,26 @@ extern crate clap;
 
 use dsp::{Node, Settings};
 use time_calc::{Bpm, Ppqn, Ticks};
-use synth::{Synth, NoteFreqGenerator, mode};
 use bmidi::{File, EventType, KeyEventType, Event};
 use clap::App;
 use std::sync::Arc;
 use std::path::Path;
 
-use futures::stream::{Stream, SendError, self};
-use futures::Future;
-use futures::Async;
-use futures::task;
-use futures::task::Executor;
-use futures::task::Run;
+use futures::stream::{self, Stream, SendError};
+use futures::{Future, Async};
+use futures::task::{self, Run, Executor};
 use std::cmp;
 
+mod synth_util;
+mod sink;
+
+use sink::Sink;
 
 struct MyExecutor;
 
 impl Executor for MyExecutor {
     fn execute(&self, r: Run) {
         r.run();
-    }
-}
-
-
-fn process_event<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F>(
-    evt: &Event, synth: &mut Synth<A, B, C, D, E, F>
-    ) {
-
-    // TODO: Pass interesting channel
-    if evt.channel == 0 {
-        if let EventType::Key{ typ, note, velocity } = evt.typ {
-            println!("Key {:?} {:?} {}", typ, note, velocity);
-            match typ {
-                KeyEventType::Press => {
-                    // FIXME: Conversion not working?!
-                    let hz = note.to_step().to_hz().hz();
-                    synth.note_on(hz, velocity as f32 / 256f32);
-                    println!("Freq on: {:?}", hz);
-                },
-                KeyEventType::Release => {
-                    let hz = note.to_step().to_hz().hz();
-                    synth.note_off(hz);
-                    println!("Freq on: {:?}", hz);
-                }
-                _ => {}
-            }
-        }
-        else {
-            println!("Ignored event {:?}", evt);
-        }
-    }
-    else {
-        println!("Ignored event {:?}", evt);
     }
 }
 
@@ -92,6 +59,7 @@ fn run() -> Result<(), ()> {
 
     println!("Playing track {} of {}", track, filename);
 
+    let mut synth = synth_util::new();
 
     let endpoint = cpal::get_default_endpoint().expect("Failed to get default endpoint");
     let format = endpoint.get_supported_formats_list().unwrap().next().expect("Failed to get endpoint format");
@@ -103,34 +71,7 @@ fn run() -> Result<(), ()> {
     let samples_rate = format.samples_rate.0 as f32;
     println!("Sample rate: {}", samples_rate);
 
-
-    // Construct our fancy Synth!
-    let mut synth = {
-        use synth::{Point, Oscillator, mode, oscillator, Envelope};
-
-        let amp_env = Envelope::from(vec!(
-            //         Time ,  Amp ,  Curve
-            Point::new(0.0  ,  0.0 ,  0.0),
-            Point::new(0.01 ,  1.0 ,  0.0),
-            Point::new(0.45 ,  1.0 ,  0.0),
-            Point::new(0.81 ,  0.8 ,  0.0),
-            Point::new(1.0  ,  0.0 ,  0.0),
-        ));
-
-        // Now we can create our oscillator from our envelopes.
-        // There are also Sine, Noise, NoiseWalk, SawExp and Square waveforms.
-        let oscillator = Oscillator::new(oscillator::waveform::Sine, amp_env, 55., ());
-
-        // Here we construct our Synth from our oscillator.
-        Synth::new(mode::Poly, ())
-            .oscillator(oscillator) // Add as many different oscillators as desired.
-            .fade(50.0, 300.0) // Attack and Release in milliseconds.
-            .num_voices(16) // By default Synth is monophonic but this gives it `n` voice polyphony.
-            .volume(0.20)
-            .spread(0.1)
-    };
-
-    let (tx, mut rx) = stream::channel();
+    let (mut tx, mut rx) = stream::channel();
 
     crossbeam::scope(|scope| {
         scope.spawn(|| -> Result<(), SendError<_, _>> {
@@ -138,8 +79,6 @@ fn run() -> Result<(), ()> {
             let track = res.track_iter(track);
             let ppqn = res.division as Ppqn;
             println!("PPQN: {:?}", ppqn);
-
-            let mut tx = tx;
 
             for ev in track {
                 tx = tx.send(Ok(ev)).wait()?;
@@ -151,14 +90,14 @@ fn run() -> Result<(), ()> {
             Ok(())
         });
 
-    /*let midi_tempo_to_bpm = |tempo| {
+    let midi_tempo_to_bpm = |tempo: f32| {
         // tempo is µs / beat (mus = 10^-6, min = 6 * 10^1 => min / mus = 6 * 10^7)
         // => bpm = (6 * 10^7) / tempo
         (6e7 / tempo) as Bpm
-    };*/
+    };
 
     // TODO: Implement speed changes
-    let bpm = 120.0 * 9.0; //midi_tempo_to_bpm(6e5);
+    let bpm = midi_tempo_to_bpm(6e4);
 
     // How many frames do we still have to write with the current state?
     let mut cursor = 0 as i64;
@@ -167,8 +106,8 @@ fn run() -> Result<(), ()> {
     let mut current_event = Event{delay: 0, channel: channel, typ: EventType::SysEx};
 
     let callback = move |buffer: cpal::UnknownTypeBuffer| -> Result<_, ()> {
-        let len = buffer.len();
-        let len = len as i64;
+        let len = buffer.len() as i64;
+
         match buffer {
             cpal::UnknownTypeBuffer::I16(mut buffer) => {
                 let mut inner_cursor = 0 as i64;
@@ -178,14 +117,12 @@ fn run() -> Result<(), ()> {
 
                 while next_cursor < start_cursor + len {
                     loops += 1;
-                    println!("\n\nstart: {}\nnext: {}\ncurrent: {}\ninner: {}\nlen: {}", start_cursor, next_cursor, cursor, inner_cursor, len);
+                    // println!("\n\nstart: {}\nnext: {}\ncurrent: {}\ninner: {}\nlen: {}", start_cursor, next_cursor, cursor, inner_cursor, len);
                     let frames = cmp::min(next_cursor - cursor, len - inner_cursor);
 
                     let settings = Settings::new(
                         samples_rate as u32, frames as u16, 1
                         );
-
-                    println!("Writing min({}, {}) = {} frames", next_cursor - cursor, len - inner_cursor, frames);
 
                     let new_output = &mut buffer[
                         inner_cursor as usize
@@ -198,17 +135,15 @@ fn run() -> Result<(), ()> {
 
                     match rx.poll() {
                         Ok(Async::Ready(Some(evt))) => {
-                            println!("Got next event: {:?}", evt);
+                            // println!("Got next event: {:?}", evt);
 
-                            process_event(&current_event, &mut synth);
+                            synth.process_event(&current_event);
 
                             let skip = Ticks(evt.delay as i64)
                                 .samples(
                                     bpm, 96 /* ppqn */,
                                     samples_rate as f64
                                     );
-
-                            println!("Skipping {} samples for a delay of {}", skip, evt.delay);
 
                             current_event = evt;
 
@@ -219,7 +154,7 @@ fn run() -> Result<(), ()> {
                             panic!("Stop it!");
                         }
                         var => {
-                            println!("{:?}", var);
+                            // println!("Unprocessed result: {:?}", var);
                             return Ok(());
 
                         
@@ -236,14 +171,12 @@ fn run() -> Result<(), ()> {
                         inner_cursor as usize
                         ..len as usize ];
 
-                    println!("Filling the buffer up from {} to {}", inner_cursor, len);
-
                     synth.audio_requested(new_output, settings);
                 }
 
                 cursor += len - inner_cursor;
 
-                println!("Processed {} events, advanced cursor by {}", loops, len);
+                // println!("Processed {} events, advanced cursor by {}", loops, len);
 
                 Ok(())
             }
