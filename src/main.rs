@@ -16,23 +16,20 @@ extern crate crossbeam;
 #[macro_use]
 extern crate clap;
 
-use dsp::{Graph, Node, FromSample, Sample, Walker, Settings};
+use dsp::{Node, Settings};
 use time_calc::{Bpm, Ppqn, Ticks};
 use synth::{Synth, NoteFreqGenerator, mode};
 use bmidi::{File, EventType, KeyEventType, Event};
-use std::cmp;
 use clap::App;
 use std::sync::Arc;
 use std::path::Path;
 
-use futures::stream::{channel, Stream, Sender, SendError, self};
+use futures::stream::{Stream, SendError, self};
 use futures::Future;
+use futures::Async;
 use futures::task;
 use futures::task::Executor;
 use futures::task::Run;
-
-use std::thread;
-use std::time::Duration;
 
 
 struct MyExecutor;
@@ -44,8 +41,9 @@ impl Executor for MyExecutor {
 }
 
 
-fn process_event<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F>(evt: &Event, synth: &mut Synth<A, B, C, D, E, F>) {
-    let mut inner_cursor: i64 = 0;
+fn process_event<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F>(
+    evt: &Event, synth: &mut Synth<A, B, C, D, E, F>
+    ) {
 
     // TODO: Pass interesting channel
     if evt.channel == 0 {
@@ -86,7 +84,8 @@ fn run() -> Result<(), ()> {
 
     let channel = value_t!(matches.value_of("CHANNEL"), u8).unwrap_or(0);
     let track = value_t!(matches.value_of("TRACK"), usize).unwrap_or(0);
-    let filename = Arc::new(matches.value_of("FILENAME").unwrap());
+    let filename = Arc::new(matches.value_of("FILENAME")
+                            .expect("Missing filename"));
 
 
     let endpoint = cpal::get_default_endpoint().expect("Failed to get default endpoint");
@@ -130,7 +129,7 @@ fn run() -> Result<(), ()> {
     crossbeam::scope(|scope| {
         scope.spawn(|| -> Result<(), SendError<_, _>> {
             let res = File::parse(Path::new(filename.as_ref()));
-            let mut track = res.track_iter(track);
+            let track = res.track_iter(track);
             let ppqn = res.division as Ppqn;
             println!("PPQN: {:?}", ppqn);
 
@@ -142,13 +141,11 @@ fn run() -> Result<(), ()> {
                 // thread::sleep_ms(ev.delay);
             }
 
-            tx = tx.send(Err(())).wait()?;
+            tx.send(Err(())).wait()?;
 
             Ok(())
         });
     });
-
-    let mut bpm = 120.0 as Bpm;
 
     let midi_tempo_to_bpm = |tempo| {
         // tempo is µs / beat (mus = 10^-6, min = 6 * 10^1 => min / mus = 6 * 10^7)
@@ -156,23 +153,23 @@ fn run() -> Result<(), ()> {
         (6e7 / tempo) as Bpm
     };
 
-    bpm = midi_tempo_to_bpm(6e5);
+    // TODO: Implement speed changes
+    let bpm = midi_tempo_to_bpm(6e5);
 
     // How many frames do we still have to write with the current state?
     let mut cursor = 0 as i64;
-    let mut prev_cursor = 0 as i64;
     let mut next_cursor = 0 as i64;
 
     let mut current_event = Event{delay: 0, channel: channel, typ: EventType::SysEx};
 
-    let callback = move |mut buffer| -> Result<_, ()> {
+    let callback = move |buffer| -> Result<_, ()> {
         match buffer {
             cpal::UnknownTypeBuffer::F32(mut buffer) => {
                 let len = buffer.len() as i64;
                 let mut inner_cursor = 0 as i64;
                 
-                while next_cursor < prev_cursor + len - inner_cursor {
-                    let frames = next_cursor - prev_cursor;
+                while next_cursor < cursor + len - inner_cursor {
+                    let frames = next_cursor - cursor;
                     let settings = Settings::new(
                         samples_rate as u32, frames as u16, 1
                         );
@@ -183,7 +180,26 @@ fn run() -> Result<(), ()> {
 
                     synth.audio_requested(new_output, settings);
 
-                    inner_cursor += frames as i64;
+                    inner_cursor += frames;
+                    cursor = next_cursor;
+
+                    match rx.poll() {
+                        Ok(Async::Ready(Some(evt))) => {
+                            println!("Got next event");
+
+                            process_event(&current_event, &mut synth);
+
+                            let skip = Ticks(evt.delay as i64)
+                                .samples(bpm, 96 /* ppqn */,
+                                         samples_rate as f64);
+
+                            current_event = evt;
+
+                            cursor = next_cursor;
+                            next_cursor += skip;
+                        }
+                        _ => panic!("Ayyyeeee")
+                    }
 
                     // TODO Get next event
                     /*let skip = Ticks(evt.delay as i64)
@@ -220,5 +236,5 @@ fn run() -> Result<(), ()> {
 }
 
 fn main() {
-    run();
+    run().expect("Error running");
 }
