@@ -9,30 +9,72 @@ extern crate synth;
 extern crate time_calc;
 extern crate dsp;
 extern crate bmidi;
-extern crate portaudio;
+extern crate cpal;
+extern crate futures;
+extern crate crossbeam;
 
 #[macro_use]
 extern crate clap;
 
-use dsp::{Graph, Node, Frame, FromSample, Sample, Walker};
-use dsp::sample::ToFrameSliceMut;
+use dsp::{Graph, Node, FromSample, Sample, Walker, Settings};
 use time_calc::{Bpm, Ppqn, Ticks};
-use portaudio as pa;
-use synth::Synth;
-use bmidi::{File, EventType, KeyEventType};
+use synth::{Synth, NoteFreqGenerator, mode};
+use bmidi::{File, EventType, KeyEventType, Event};
 use std::cmp;
 use clap::App;
+use std::sync::Arc;
+use std::path::Path;
 
-const CHANNELS: usize = 2;
-const FRAMES: u32 = 256;
-const SAMPLE_HZ: f64 = 44_100.0;
+use futures::stream::{channel, Stream, Sender, SendError, self};
+use futures::Future;
+use futures::task;
+use futures::task::Executor;
+use futures::task::Run;
 
-// Currently supports i8, i32, f32.
-pub type AudioSample = f32;
-pub type Input = AudioSample;
-pub type Output = AudioSample;
+use std::thread;
+use std::time::Duration;
 
-fn run() -> Result<(), pa::Error> {
+
+struct MyExecutor;
+
+impl Executor for MyExecutor {
+    fn execute(&self, r: Run) {
+        r.run();
+    }
+}
+
+
+fn process_event<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F>(evt: &Event, synth: &mut Synth<A, B, C, D, E, F>) {
+    let mut inner_cursor: i64 = 0;
+
+    // TODO: Pass interesting channel
+    if evt.channel == 0 {
+        if let EventType::Key{ typ, note, velocity } = evt.typ {
+            println!("Key {:?} {:?} {}", typ, note, velocity);
+            match typ {
+                KeyEventType::Press => {
+                    // FIXME: Conversion not working?!
+                    let hz = note.to_step().to_hz().hz();
+                    synth.note_on(hz, velocity as f32 / 256f32);
+                },
+                KeyEventType::Release => {
+                    let hz = note.to_step().to_hz().hz();
+                    synth.note_off(hz);
+                }
+                _ => {}
+            }
+        }
+        else {
+            println!("Ignored event {:?}", evt);
+        }
+    }
+    else {
+        println!("Ignored event {:?}", evt);
+    }
+}
+
+
+fn run() -> Result<(), ()> {
     let matches = App::new("bmidi-play")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Simple midi player")
@@ -43,8 +85,19 @@ fn run() -> Result<(), pa::Error> {
         .get_matches();
 
     let channel = value_t!(matches.value_of("CHANNEL"), u8).unwrap_or(0);
-    let track = value_t!(matches.value_of("TRACK"), usize).unwrap_or(1);
-    let filename = matches.value_of("FILENAME").unwrap();
+    let track = value_t!(matches.value_of("TRACK"), usize).unwrap_or(0);
+    let filename = Arc::new(matches.value_of("FILENAME").unwrap());
+
+
+    let endpoint = cpal::get_default_endpoint().expect("Failed to get default endpoint");
+    let format = endpoint.get_supported_formats_list().unwrap().next().expect("Failed to get endpoint format");
+
+    let event_loop = cpal::EventLoop::new();
+    let executor = Arc::new(MyExecutor);
+
+    let (mut voice, stream) = cpal::Voice::new(&endpoint, &format, &event_loop).expect("Failed to create a voice");
+    let samples_rate = format.samples_rate.0 as f32;
+
 
     // Construct our fancy Synth!
     let mut synth = {
@@ -72,11 +125,29 @@ fn run() -> Result<(), pa::Error> {
             .spread(0.1)
     };
 
-    // We'll use this to keep track of time and break from the loop after 6 seconds.
-    let res = File::parse(filename.as_ref());
-    let mut track = res.track_iter(track).peekable();
+    let (tx, mut rx) = stream::channel();
 
-    let ppqn = res.division as Ppqn;
+    crossbeam::scope(|scope| {
+        scope.spawn(|| -> Result<(), SendError<_, _>> {
+            let res = File::parse(Path::new(filename.as_ref()));
+            let mut track = res.track_iter(track);
+            let ppqn = res.division as Ppqn;
+            println!("PPQN: {:?}", ppqn);
+
+            let mut tx = tx;
+
+            for ev in track {
+                println!("{:?}", ev);
+                tx = tx.send(Ok(ev)).wait()?;
+                // thread::sleep_ms(ev.delay);
+            }
+
+            tx = tx.send(Err(())).wait()?;
+
+            Ok(())
+        });
+    });
+
     let mut bpm = 120.0 as Bpm;
 
     let midi_tempo_to_bpm = |tempo| {
@@ -89,95 +160,61 @@ fn run() -> Result<(), pa::Error> {
 
     // How many frames do we still have to write with the current state?
     let mut cursor = 0 as i64;
+    let mut prev_cursor = 0 as i64;
+    let mut next_cursor = 0 as i64;
 
-    let callback = move |pa::OutputStreamCallbackArgs { buffer, frames, time, .. }| {
-        let buffer: &mut [[Output; CHANNELS as usize]]
-            = buffer.to_frame_slice_mut().unwrap();
+    let mut current_event = Event{delay: 0, channel: channel, typ: EventType::SysEx};
 
-        dsp::slice::equilibrium(buffer);
+    let callback = move |mut buffer| -> Result<_, ()> {
+        match buffer {
+            cpal::UnknownTypeBuffer::F32(mut buffer) => {
+                let len = buffer.len() as i64;
+                let mut inner_cursor = 0 as i64;
+                
+                while next_cursor < prev_cursor + len - inner_cursor {
+                    let frames = next_cursor - prev_cursor;
+                    let settings = Settings::new(
+                        samples_rate as u32, frames as u16, 1
+                        );
 
-        let mut inner_cursor: i64 = 0;
+                    let new_output = &mut buffer[
+                        inner_cursor as usize
+                        ..(inner_cursor + frames) as usize ];
 
-        while inner_cursor < buffer.len() as i64 {
-            if cursor <= 0 {
-                let evt = track.next().unwrap();
+                    synth.audio_requested(new_output, settings);
 
-                if evt.channel == channel {
-                    if let EventType::Key{ typ, note, velocity } = evt.typ {
-                        println!("Key {:?} {:?} {}", typ, note, velocity);
-                        match typ {
-                            KeyEventType::Press => {
-                                // FIXME: Conversion not working?!
-                                let hz = note.to_step().to_hz().hz();
-                                synth.note_on(hz, velocity as f32 / 256f32);
-                            },
-                            KeyEventType::Release => {
-                                let hz = note.to_step().to_hz().hz();
-                                synth.note_off(hz);
-                            }
-                            _ => {}
-                        }
-                    }
-                    else {
-                        println!("Ignored event {:?}", evt);
-                    }
-                }
-                else {
-                    println!("Ignored event {:?}", evt);
+                    inner_cursor += frames as i64;
+
+                    // TODO Get next event
+                    /*let skip = Ticks(evt.delay as i64)
+                        .samples(bpm, 120 /* ppqn*/, samples_rate as f64)
+                        as u16;*/
                 }
 
-                if let Some(next_evt) = track.peek() {
-                    // TODO Modify bpm using SetTempo events, for that we need
-                    //      to iterate over all tracks at once (FF 51 03 + 24bit,
-                    //      microseconds per quarter node)
-                    let skip = Ticks(next_evt.delay as i64)
-                        .samples(bpm, ppqn, SAMPLE_HZ as f64)
-                        as u16;
+                if inner_cursor < len {
+                    let settings = Settings::new(
+                        samples_rate as u32, (len - inner_cursor) as u16, 1
+                        );
 
-                    cursor += skip as i64;
+                    let new_output = &mut buffer[
+                        (inner_cursor as usize * 1) as usize
+                        ..(len as usize * 1) as usize ];
+
+                    synth.audio_requested(new_output, settings);
                 }
-                else {
-                    return pa::Complete
-                }
+
+                Ok(())
             }
-
-            let new_inner_cursor = cmp::min(
-                inner_cursor as i64 + cursor,
-                frames as i64
-                );
-
-            let (begin, end) = (inner_cursor as i64, new_inner_cursor as i64);
-
-            let frames = end - begin;
-
-            let new_output = &mut buffer[
-                (begin as usize * CHANNELS) as usize
-                ..(end as usize * CHANNELS) as usize ];
-           
-            // FIXME: Write the actual audio data
-            // synth.audio_requested();
-            // synth.audio_requested(new_output, SAMPLE_HZ);
-
-            cursor -= (new_inner_cursor - inner_cursor) as i64;
-            inner_cursor = new_inner_cursor;
+            _ => Err(())
         }
-
-        pa::Continue
+        
     };
 
-    // Construct PortAudio and the stream.
-    let pa = try!(pa::PortAudio::new());
-    let settings = try!(
-        pa.default_output_stream_settings::<f32>(
-            CHANNELS as i32,
-            SAMPLE_HZ,
-            FRAMES)
-        );
-    let mut stream = try!(pa.open_non_blocking_stream(settings, callback));
-    try!(stream.start());
+    voice.play();
 
-    // Loop while the stream is active.
-    while let Ok(true) = stream.is_active() {}
+    task::spawn(stream.for_each(callback)).execute(executor);
+
+    event_loop.run();
 
     Ok(())
 }
