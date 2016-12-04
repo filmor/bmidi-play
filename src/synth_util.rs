@@ -3,21 +3,19 @@ extern crate bmidi;
 
 use sink::Sink;
 use synth::{Synth, NoteFreqGenerator, mode, oscillator, Envelope};
-use bmidi::{Event, EventType, KeyEventType};
+use bmidi::{EventType, KeyEventType};
 
 
 pub fn new() -> Synth<mode::Poly, (), oscillator::waveform::Sine, Envelope, f64, ()> {
     // Construct our fancy Synth!
     use synth::{Synth, Point, Oscillator, mode, oscillator, Envelope};
 
-    let amp_env = Envelope::from(vec!(
-        //         Time ,  Amp ,  Curve
-        Point::new(0.0  ,  0.0 ,  0.0),
-        Point::new(0.01 ,  1.0 ,  0.0),
-        Point::new(0.45 ,  1.0 ,  0.0),
-        Point::new(0.81 ,  0.8 ,  0.0),
-        Point::new(1.0  ,  0.0 ,  0.0),
-    ));
+    let amp_env = Envelope::from(vec![//         Time ,  Amp ,  Curve
+                                      Point::new(0.0, 0.0, 0.0),
+                                      Point::new(0.01, 1.0, 0.0),
+                                      Point::new(0.45, 1.0, 0.0),
+                                      Point::new(0.81, 0.8, 0.0),
+                                      Point::new(1.0, 0.0, 0.0)]);
 
     // Now we can create our oscillator from our envelopes.
     // There are also Sine, Noise, NoiseWalk, SawExp and Square waveforms.
@@ -37,25 +35,23 @@ impl<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F> Sink for Synth<A, B, C, D,
     fn process_event(&mut self, evt: &bmidi::Event) {
         // TODO: Pass interesting channel
         if evt.channel == 0 {
-            if let EventType::Key{ typ, note, velocity } = evt.typ {
+            if let EventType::Key { typ, note, velocity } = evt.typ {
                 // println!("Key {:?} {:?} {}", typ, note, velocity);
                 let hz = note.to_step().to_hz().hz();
                 match typ {
                     KeyEventType::Press => {
                         // FIXME: Conversion not working?!
                         self.note_on(hz, velocity as f32 / 256f32);
-                    },
+                    }
                     KeyEventType::Release => {
                         self.note_off(hz);
                     }
                     _ => {}
                 }
-            }
-            else {
+            } else {
                 // println!("Ignored event {:?}", evt);
             }
-        }
-        else {
+        } else {
             // println!("Ignored event {:?}", evt);
         }
     }
