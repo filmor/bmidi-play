@@ -12,6 +12,3 @@ cpal = "0.4"
 dsp-chain = "0.12"
 futures = "0.1"
 crossbeam = "0.2"
-
-[replace]
-"bmidi:0.0.2" = { path = "../bmidi" }
