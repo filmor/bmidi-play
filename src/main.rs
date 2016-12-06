@@ -13,7 +13,6 @@ extern crate clap;
 use dsp::{Node, Settings};
 use time_calc::{Bpm, Ticks};
 use bmidi::{EventType, Event};
-use clap::App;
 use std::sync::Arc;
 use std::path::Path;
 
@@ -39,17 +38,17 @@ impl Executor for MyExecutor {
 
 
 fn run() -> Result<(), ()> {
-    let matches = App::new("bmidi-play")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Simple midi player")
-        .args_from_usage(
-            "-t, --track=[TRACK] 'The track to play'
-             -c, --channel=[CHANNEL] 'The channel in the track you want to hear'
-             [FILENAME] 'A standard midi file'")
-        .get_matches();
+    let matches =
+        clap_app!(bmidi_play =>
+                  (version: env!("CARGO_PKG_VERSION"))
+                  (about: "Simple midi player")
+                  (@arg TRK: -t --track +takes_value "The track to play")
+                  (@arg CHN: -c --channel +takes_value "The channel to play")
+                  (@arg FILENAME: +required "A standard midi file")
+                  ).get_matches();
 
-    let channel = value_t!(matches.value_of("CHANNEL"), u8).unwrap_or(0);
-    let track = value_t!(matches.value_of("TRACK"), usize).unwrap_or(0);
+    let channel = value_t!(matches.value_of("CHN"), u8).unwrap_or(0);
+    let track = value_t!(matches.value_of("TRK"), usize).unwrap_or(0);
     let filename = matches.value_of("FILENAME").expect("Missing filename");
 
     println!("Playing track {} of {}", track, filename);
@@ -101,7 +100,6 @@ fn run() -> Result<(), ()> {
 
         match buffer {
             cpal::UnknownTypeBuffer::I16(mut buffer) => {
-                println!("Got i16 buffer of length {}", len);
                 let mut inner_cursor = 0 as i64;
                 let start_cursor = cursor;
 
