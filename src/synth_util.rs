@@ -1,21 +1,23 @@
-extern crate synth;
 extern crate bmidi;
+extern crate synth;
 
-use sink::Sink;
-use synth::{Synth, NoteFreqGenerator, mode, oscillator, Envelope};
 use bmidi::{EventType, KeyEventType};
-
+use sink::Sink;
+use synth::instrument::{mode, NoteFreqGenerator};
+use synth::{oscillator, Envelope, Synth};
 
 pub fn new() -> Synth<mode::Poly, (), oscillator::waveform::Sine, Envelope, f64, ()> {
     // Construct our fancy Synth!
-    use synth::{Synth, Point, Oscillator, mode, oscillator, Envelope};
+    use synth::{oscillator, Envelope, Oscillator, Point, Synth};
 
-    let amp_env = Envelope::from(vec![//         Time ,  Amp ,  Curve
-                                      Point::new(0.0, 0.0, 0.0),
-                                      Point::new(0.01, 1.0, 0.0),
-                                      Point::new(0.45, 1.0, 0.0),
-                                      Point::new(0.81, 0.8, 0.0),
-                                      Point::new(1.0, 0.0, 0.0)]);
+    let amp_env = Envelope::from(vec![
+        //         Time ,  Amp ,  Curve
+        Point::new(0.0, 0.0, 0.0),
+        Point::new(0.01, 1.0, 0.0),
+        Point::new(0.45, 1.0, 0.0),
+        Point::new(0.81, 0.8, 0.0),
+        Point::new(1.0, 0.0, 0.0),
+    ]);
 
     // Now we can create our oscillator from our envelopes.
     // There are also Sine, Noise, NoiseWalk, SawExp and Square waveforms.
@@ -30,12 +32,16 @@ pub fn new() -> Synth<mode::Poly, (), oscillator::waveform::Sine, Envelope, f64,
         .spread(0.1)
 }
 
-
 impl<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F> Sink for Synth<A, B, C, D, E, F> {
     fn process_event(&mut self, evt: &bmidi::Event) {
         // TODO: Pass interesting channel
         if evt.channel == 0 {
-            if let EventType::Key { typ, note, velocity } = evt.typ {
+            if let EventType::Key {
+                typ,
+                note,
+                velocity,
+            } = evt.typ
+            {
                 // println!("Key {:?} {:?} {}", typ, note, velocity);
                 let hz = note.to_step().to_hz().hz();
                 match typ {
