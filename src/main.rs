@@ -2,8 +2,8 @@
 extern crate bmidi;
 extern crate cpal;
 extern crate crossbeam;
+extern crate crossbeam_channel;
 extern crate dsp;
-extern crate futures;
 extern crate synth;
 extern crate time_calc;
 
@@ -16,9 +16,6 @@ use dsp::Node;
 use std::path::Path;
 use time_calc::{Bpm, Ticks};
 
-use futures::stream::Stream;
-use futures::sync::mpsc;
-use futures::Async;
 use std::cmp;
 
 mod sink;
@@ -61,7 +58,7 @@ fn run() {
     let samples_rate = format.sample_rate.0 as f64;
     println!("Sample rate: {}", samples_rate);
 
-    let (tx, mut rx) = mpsc::channel(4);
+    let (tx, rx) = crossbeam_channel::unbounded();
 
     println!("Channel filling");
 
@@ -89,87 +86,83 @@ fn run() {
 
     println!("Starting to play");
 
-    crossbeam::scope(move |scope| {
+    crossbeam::scope(|scope| {
         source::fill_channel(scope, tx, Path::new(filename), track);
 
         println!("Starting event loop");
 
         event_loop.play_stream(stream_id);
-        event_loop.run(
-            move |_stream_id, stream_data| {
+        event_loop.run(move |_stream_id, stream_data| {
             match stream_data {
                 cpal::StreamData::Output { buffer } => {
                     let len = buffer.len() as i64;
 
-                    let mut buffer =
-                    if let cpal::UnknownTypeOutputBuffer::F32(mut inner) = buffer {
+                    let mut buffer = if let cpal::UnknownTypeOutputBuffer::F32(mut inner) = buffer {
                         inner
-                    }
-                    else {
+                    } else {
                         return;
                     };
-
-                    println!("Requested data, length {}", len);
 
                     let mut inner_cursor = 0 as i64;
                     let start_cursor = cursor;
 
                     while next_cursor < start_cursor + len {
-                        // println!("\n\nstart: {}\nnext: {}\ncurrent: {}\ninner: {}\nlen: {}", start_cursor, next_cursor, cursor, inner_cursor, len);
+                        println!(
+                            "\n\nstart: {}\nnext: {}\ncurrent: {}\ninner: {}\nlen: {}",
+                            start_cursor, next_cursor, cursor, inner_cursor, len
+                        );
                         let frames = cmp::min(next_cursor - cursor, len - inner_cursor);
 
-                        let new_output: &mut [[f32; 1]] = buffer[
-                            inner_cursor as usize..(inner_cursor + frames) as usize
-                        ].to_sample_slice_mut()
-                         .to_frame_slice_mut()
-                         .unwrap();
+                        let new_output: &mut [[f32; 1]] = buffer
+                            [inner_cursor as usize..(inner_cursor + frames) as usize]
+                            .to_sample_slice_mut()
+                            .to_frame_slice_mut()
+                            .unwrap();
 
                         synth.audio_requested(new_output, samples_rate);
 
                         inner_cursor += frames;
                         cursor = next_cursor;
 
-                        match rx.poll() {
-                            Ok(Async::Ready(Some(evt))) => {
-                                // println!("Got next event: {:?}", evt);
+                        match rx.recv() {
+                            Some(evt) => {
+                                println!("Got next event: {:?}", evt);
 
                                 synth.process_event(&current_event);
 
-                                let skip = Ticks(evt.delay as i64)
-                                    .samples(bpm, 96 /* ppqn */, samples_rate as f64);
+                                let skip = Ticks(evt.delay as i64).samples(
+                                    bpm,
+                                    96, /* ppqn */
+                                    samples_rate as f64,
+                                );
 
                                 current_event = evt;
 
                                 cursor = next_cursor;
                                 next_cursor += skip;
                             }
-                            Ok(Async::Ready(None)) => {
-                                panic!("Stop it!");
-                            }
-                            var => {
-                                println!("Unprocessed result: {:?}", var);
+                            None => {
+                                println!("Sender died");
                                 return;
                             }
                         }
                     }
 
                     if inner_cursor < len {
-                        let new_output: &mut [[f32; 1]] =
-                            &mut buffer[inner_cursor as usize..len as usize]
-                         .to_sample_slice_mut()
-                         .to_frame_slice_mut()
-                         .unwrap();
+                        let new_output: &mut [[f32; 1]] = &mut buffer
+                            [inner_cursor as usize..len as usize]
+                            .to_sample_slice_mut()
+                            .to_frame_slice_mut()
+                            .unwrap();
                         synth.audio_requested(new_output, samples_rate);
                     }
 
                     cursor += len - inner_cursor;
                     // println!("Processed {} events, advanced cursor by {}", loops, len);
                 }
-            _ => println!("Unexpected type")
+                _ => println!("Unexpected type"),
             }
-
-            }
-        );
+        });
     });
 }
 
