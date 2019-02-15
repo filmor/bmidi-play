@@ -56,11 +56,9 @@ fn run() {
         .expect("Failed to build output stream");
 
     let samples_rate = format.sample_rate.0 as f64;
-    println!("Sample rate: {}", samples_rate);
+    println!("Format: {:?}", format);
 
     let (tx, rx) = crossbeam_channel::unbounded();
-
-    println!("Channel filling");
 
     let midi_tempo_to_bpm = |tempo: f32| {
         // tempo is µs / beat (mus = 10^-6, min = 6 * 10^1 => min / mus = 6 * 10^7)
@@ -69,7 +67,7 @@ fn run() {
     };
 
     // TODO: Implement speed changes
-    let bpm = midi_tempo_to_bpm(6e4);
+    let bpm = midi_tempo_to_bpm(10e4);
 
     // How many frames do we still have to write with the current state?
     let mut cursor = 0 as i64;
@@ -113,7 +111,7 @@ fn run() {
                         );
                         let frames = cmp::min(next_cursor - cursor, len - inner_cursor);
 
-                        let new_output: &mut [[f32; 1]] = buffer
+                        let new_output: &mut [[f32; 2]] = buffer
                             [inner_cursor as usize..(inner_cursor + frames) as usize]
                             .to_sample_slice_mut()
                             .to_frame_slice_mut()
@@ -149,7 +147,7 @@ fn run() {
                     }
 
                     if inner_cursor < len {
-                        let new_output: &mut [[f32; 1]] = &mut buffer
+                        let new_output: &mut [[f32; 2]] = &mut buffer
                             [inner_cursor as usize..len as usize]
                             .to_sample_slice_mut()
                             .to_frame_slice_mut()

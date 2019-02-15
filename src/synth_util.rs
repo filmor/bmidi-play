@@ -42,7 +42,7 @@ impl<A: mode::Mode, B: NoteFreqGenerator, C, D, E, F> Sink for Synth<A, B, C, D,
                 velocity,
             } = evt.typ
             {
-                // println!("Key {:?} {:?} {}", typ, note, velocity);
+                println!("Key {:?} {:?} {}", typ, note, velocity);
                 let hz = note.to_step().to_hz().hz();
                 match typ {
                     KeyEventType::Press => {
